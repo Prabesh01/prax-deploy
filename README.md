@@ -44,3 +44,10 @@ sudo chfn -f "" -o "prabesh01" -p "" $USER
   repo: git@github.com:Prabesh01/statamic-cool-writing-customized.git
   server: sname
 ```
+
+## Usage
+```
+./prax.sh
+usage: ./prax.sh list
+       ./prax.sh deploy all | ./prax.sh deploy project1 project2 ...
+```
