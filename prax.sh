@@ -3,6 +3,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS="$SCRIPT_DIR/configs/projects.yaml"
 SERVERS="$SCRIPT_DIR/configs/servers.yaml"
+PROJECTS_DATA="$SCRIPT_DIR/configs/projects-data.yaml"
+DATA_STORES="$SCRIPT_DIR/configs/data-stores.yaml"
 KEYS="$SCRIPT_DIR/keys"
 
 [[ -f "$SCRIPT_DIR/.env" ]] && source "$SCRIPT_DIR/.env"
@@ -13,22 +15,46 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; RESET='\033[0m'
 
 app_field()    { yq e ".[] | select(.name == \"$1\") | .$2" "$APPS"    | grep -v '^null$'; }
 server_field() { yq e ".[] | select(.name == \"$1\") | .$2" "$SERVERS" | grep -v '^null$'; }
+data_field() { yq e ".[] | select(.project == \"$1\") | .$2" "$PROJECTS_DATA" | grep -v '^null$'; }
+store_field() { yq e ".[] | select(.name == \"$1\") | .$2" "$DATA_STORES" | grep -v '^null$'; }
 
 build_ssh_opts() {
-    local key=$1
+    local server=$1
+
+    local ip=$(server_field "$server" ip)
+    local srv_user=$(server_field "$server" user)
+    local key=$(server_field "$server" key)
+
+    TARGET="${ip:-$server}"
+    if [[ -n "$srv_user" ]]; then
+        TARGET="$srv_user@$ip"
+    fi
+
     SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes)
     [[ -n "$key" ]] && SSH_OPTS+=(-i "$KEYS/$key")
 }
 
+upload_to_s3() {
+    local store=$1
+    local file=$2
+    echo "  Uploading to $store..."
+
+    local bucket=$(store_field "$store" bucket)
+    local endpoint=$(store_field "$store" endpoint)
+    local key_id=$(store_field "$store" key_id)
+    local key_secret=$(store_field "$store" key_secret)
+ 
+    ssh "${SSH_OPTS[@]}" "$TARGET" "rclone copyto /tmp/$file ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${file}' --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket --quiet"
+}
+
 setup_server() {
     #local ssh_opts="$1"
-    local target="$1"
-    local deploy_dir="$2"
-    local gh_username="$3"
+    local deploy_dir="$1"
+    local gh_username="$2"
 
-    echo -e "${YELLOW}Setting up $target...${RESET}"
+    echo -e "${YELLOW}Setting up $TARGET...${RESET}"
 
-    ssh "${SSH_OPTS[@]}" "$target" << EOF
+    ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
 set -e
 
 # Docker
@@ -39,6 +65,11 @@ if ! command -v docker &>/dev/null; then
 fi
 
 docker --version || { echo "Docker install failed"; exit 1; }
+
+# rclone
+if ! command -v rclone &>/dev/null; then
+    curl https://rclone.org/install.sh | sudo bash
+fi
 
 # Create deploy user
 if ! id deploy &>/dev/null; then
@@ -54,10 +85,52 @@ chown deploy:deploy "$deploy_dir"
 echo "✓ Server ready"
 EOF
 
-ssh "${SSH_OPTS[@]}" "$target" \
+ssh "${SSH_OPTS[@]}" "$TARGET" \
     "echo '$gh_token' | sudo -u deploy docker login ghcr.io -u $gh_username --password-stdin"
 
     echo -e "${GREEN}✓ $server setup complete${RESET}"
+}
+
+backup_app() {
+    local app=$1
+    echo -e "\n${YELLOW}▶ Backing up $app...${RESET}"
+
+    local server=$(app_field "$app" server)
+    [[ -z "$server" ]] && { echo -e "${RED}✗ Project '$app' not found${RESET}"; return 1; }
+
+    local deploy_dir="/var/www/$app"
+    build_ssh_opts "$server"
+
+    # read files to backup from projects-data.yaml
+    local files=$(data_field "$app" "files[]")
+    [[ -z "$files" ]] && { echo -e "${RED}✗ No data files config for the project $app${RESET}"; return 1; }
+
+    local datastore=$(data_field "$app" datastore)
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+
+    local store_type=$(store_field "$datastore" "type")
+    local backup_path="${app}/${timestamp}.tar.gz"
+
+    # build tar arguments
+    local tar_args=""
+    while IFS= read -r file; do
+        tar_args="$tar_args $file"
+    done <<< "$files"
+
+    echo "  Creating archive on server..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
+mkdir -p /tmp/$app
+cd $deploy_dir
+tar czf /tmp/$backup_path $tar_args
+echo "  Archive created: /tmp/$backup_path"
+EOF
+
+    upload_to_${store_type} "$datastore" "$backup_path" 
+
+    # cleanup
+    ssh "${SSH_OPTS[@]}" "$TARGET" "rm -f /tmp/$backup_path"
+
+    echo -e "${GREEN}✓ Backup completed${RESET}"
 }
 
 
@@ -66,20 +139,11 @@ deploy_app() {
     echo -e "\n${YELLOW}▶ Deploying $app...${RESET}"
 
     local server=$(app_field "$app" server)
-    local repo=$(app_field "$app" repo)
     [[ -z "$server" ]] && { echo -e "${RED}✗${RESET} Project '$app' not found in config"; return 1; }
 
-    local ip=$(server_field "$server" ip)
-    local srv_user=$(server_field "$server" user)
-    local key=$(server_field "$server" key)
+    local repo=$(app_field "$app" repo)
 
-    local ssh_opts="-o StrictHostKeyChecking=no -o BatchMode=yes"
-    local target="${ip:-$server}"
-    if [[ -n "$key" ]]; then
-    #    ssh_opts="$ssh_opts -i $KEYS/$key"
-        target="$srv_user@$ip"
-    fi
-    build_ssh_opts "$key"
+    build_ssh_opts "$server"
 
     # --- clone ---
     local tmp=$(mktemp -d)
@@ -111,20 +175,25 @@ deploy_app() {
     }
 
     deploy_dir="/var/www/$app"
-    setup_server "$target" "$deploy_dir" "$gh_username" # $ssh_opts $target $app
+    setup_server "$deploy_dir" "$gh_username" # $ssh_opts $target $app
 
     # --- deploy on VPS ---
     echo "  Deploying on $server..."
 
     # copy compose file and env if not already there
-    # sync docker-compose.yml from repo (but not .env — that stays on VPS)
-    scp "${SSH_OPTS[@]}" "$tmp/app/docker-compose.yml" "$target:$deploy_dir/docker-compose.yml"
-    ssh "${SSH_OPTS[@]}" $target "sudo chown -R deploy:deploy $deploy_dir"
+    # sync docker-compose.yml and .env.example from repo
+    scp "${SSH_OPTS[@]}" "$tmp/app/docker-compose.yml" "$TARGET:$deploy_dir/docker-compose.yml"
+    scp "${SSH_OPTS[@]}" "$tmp/app/.env.example" "$TARGET:$deploy_dir/.env.example"
+    ssh "${SSH_OPTS[@]}" $TARGET "sudo chown -R deploy:deploy $deploy_dir"
 
-    ssh "${SSH_OPTS[@]}" $target << ENDSSH
+    ssh "${SSH_OPTS[@]}" $TARGET << ENDSSH
 sudo -u deploy bash << 'INNEREOF'
 cd $deploy_dir
 docker compose pull -q
+# if .env is a directory (docker created it), remove it
+[ -d .env ] && rm -rf .env && echo "  Removed .env directory"
+# create .env from .env.example if missing
+[ ! -f .env ] && cp .env.example .env 2>/dev/null && echo "  Created .env from .env.example" || true
 docker compose up -d --remove-orphans
 docker image prune -f
 INNEREOF
@@ -144,6 +213,11 @@ case "${1:-}" in
             done < <(yq e '.[].name' "$APPS")
         done < <(yq e '.[].server' "$APPS" | sort -u)
         echo
+        ;;
+    backup)
+        app=${2}
+        [[ -z "$app" ]] && { echo "usage: $0 backup <project name>"; exit 1; }
+        backup_app "$app"
         ;;
     deploy)
         target=${2}
