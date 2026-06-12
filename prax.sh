@@ -101,7 +101,7 @@ deploy_app() {
     gh_username=$(echo "$gh_username" | tr '[:upper:]' '[:lower:]')
     ghcr_url="ghcr.io/$gh_username/$app:latest"
 
-    # docker tag $app $ghcr_url
+    docker tag $app $ghcr_url
 
     echo "  Pushing $app..."
     #docker push $ghcr_url -q
