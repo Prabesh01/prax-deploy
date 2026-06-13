@@ -71,6 +71,23 @@ if ! command -v rclone &>/dev/null; then
     curl https://rclone.org/install.sh | sudo bash
 fi
 
+if ! command -v caddy &>/dev/null; then
+    echo "  Installing Caddy..."
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+        | gpg --dearmor --batch --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+        | tee /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update -qq
+    apt-get install -y caddy
+    systemctl enable --now caddy
+fi
+
+# Ensure Caddyfile exists
+if [ ! -f /etc/caddy/Caddyfile ]; then
+    echo "# Managed by prax" > /etc/caddy/Caddyfile
+fi
+
 # Create deploy user
 if ! id deploy &>/dev/null; then
     echo "  Creating deploy user..."
@@ -82,7 +99,18 @@ fi
 mkdir -p "$deploy_dir"
 chown deploy:deploy "$deploy_dir"
 
-echo "✓ Server ready"
+EOF
+
+ssh "${SSH_OPTS[@]}" "$TARGET" << 'EOF'
+COMMON_SERVICES=("nginx" "apache2" "httpd" "lighttpd")
+for svc in "${COMMON_SERVICES[@]}"; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        echo "  Found active $svc. Stopping and disabling..."
+        systemctl stop "$svc"
+        systemctl disable "$svc"
+    fi
+done
+systemctl enable --now caddy
 EOF
 
 ssh "${SSH_OPTS[@]}" "$TARGET" \
@@ -249,6 +277,52 @@ EOF
     echo -e "${GREEN}✓ Restore completed${RESET}"
 }
 
+parse_domain_entry() {
+    local entry=$1
+    CONTAINER_PORT=$(echo "$entry" | cut -d: -f1)
+    DOMAIN=$(echo "$entry" | cut -d: -f2)
+    HOST_PORT=$(echo "$entry" | cut -d: -f3)
+}
+
+generate_port_override() {
+    local app=$1
+    local temp_path=$2
+
+    local service=$(yq e '.services | keys | .[0]' "$temp_path/docker-compose.yml")
+
+    cat > "$temp_path/docker-compose.override.yml" << EOF
+services:
+  $service:
+    ports:
+EOF
+
+    while IFS= read -r entry; do
+        parse_domain_entry "$entry"
+        if [[ "$DOMAIN" == "-" ]]; then
+            echo "      - \"$HOST_PORT:$CONTAINER_PORT\"" >> "$temp_path/docker-compose.override.yml"
+        else
+            echo "      - \"127.0.0.1:$HOST_PORT:$CONTAINER_PORT\"" >> "$temp_path/docker-compose.override.yml"
+        fi
+    done < <(yq e ".[] | select(.name == \"$app\") | .domains[]" "$APPS")
+yq e 'del(.services[].ports)' -i "$temp_path/docker-compose.yml"
+}
+
+update_caddy() {
+    local domain=$1
+    local port=$2
+
+    local caddy_block="\n"
+    caddy_block+="$domain {\n    reverse_proxy localhost:$port\n}\n"
+    caddy_block+="# prax:$domain:end"
+
+    ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
+# remove old block
+sed -i '/$domain {/,/# prax:$domain:end/d' /etc/caddy/Caddyfile 2>/dev/null || true
+printf "$caddy_block\n" >> /etc/caddy/Caddyfile
+caddy fmt --overwrite /etc/caddy/Caddyfile
+systemctl reload caddy
+EOF
+}
 
 deploy_app() {
     local app=$1
@@ -266,14 +340,14 @@ deploy_app() {
     trap "rm -rf $tmp" RETURN
 
     echo "  Cloning $repo..."
-    git clone --depth=1 "$repo" "$tmp/app" -q || {
+    git clone --depth=1 "$repo" "$tmp/$app" -q || {
         echo -e "${RED}✗ Clone failed${RESET}"; return 1
     }
 
     # --- build ---
     echo "  Building $app..."
-    # docker build -t "$app" "$tmp/app" -q
-    docker build -f "$tmp/app/Dockerfile" -t "$app" "$tmp/app" || {
+    # docker build -t "$app" "$tmp/$app" -q
+    docker build -f "$tmp/$app/Dockerfile" -t "$app" "$tmp/$app" || {
         echo -e "${RED}✗ Build failed${RESET}"; return 1
     }
 
@@ -296,10 +370,14 @@ deploy_app() {
     # --- deploy on VPS ---
     echo "  Deploying on $server..."
 
+    echo "  Overriding service ports..."
+    generate_port_override "$app" "$tmp/$app/"
+
     # copy compose file and env if not already there
     # sync docker-compose.yml and .env.example from repo
-    scp "${SSH_OPTS[@]}" "$tmp/app/docker-compose.yml" "$TARGET:$deploy_dir/docker-compose.yml"
-    scp "${SSH_OPTS[@]}" "$tmp/app/.env.example" "$TARGET:$deploy_dir/.env.example"
+    scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.yml" "$TARGET:$deploy_dir/docker-compose.yml"
+    [ -f $tmp/$app/docker-compose.override.yml ] &&  scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.override.yml" "$TARGET:$deploy_dir/docker-compose.override.yml"
+    scp "${SSH_OPTS[@]}" "$tmp/$app/.env.example" "$TARGET:$deploy_dir/.env.example"
     ssh "${SSH_OPTS[@]}" $TARGET "sudo chown -R deploy:deploy $deploy_dir"
 
     ssh "${SSH_OPTS[@]}" $TARGET << ENDSSH
@@ -316,6 +394,14 @@ docker compose up -d --remove-orphans
 docker image prune -f
 INNEREOF
 ENDSSH
+
+echo "  Configuring domains..."
+while IFS= read -r entry; do
+        parse_domain_entry "$entry"
+        [[ "$DOMAIN" == "-" ]] && continue
+        update_caddy "$DOMAIN" "$HOST_PORT"
+done < <(app_field "$app" "domains[]")
+
 
 echo -e "${GREEN}✓ $app deployed${RESET}"
 
