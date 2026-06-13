@@ -133,6 +133,122 @@ EOF
     echo -e "${GREEN}✓ Backup completed${RESET}"
 }
 
+list_s3() {
+    local store=$1
+    local app=$2
+
+    local bucket=$(store_field "$store" bucket)
+    local endpoint=$(store_field "$store" endpoint)
+    local key_id=$(store_field "$store" key_id)
+    local key_secret=$(store_field "$store" key_secret)
+
+    ssh "${SSH_OPTS[@]}" "$TARGET" "rclone lsf ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${app}' --s3-endpoint='${endpoint}' --s3-region=auto --s3-no-check-bucket 2>/dev/null"
+}
+
+list_backups() {
+    local app=$1
+    local datastore=$2
+    local store_type=$(store_field "$datastore" type)
+    echo -e "\n${YELLOW}Backups for $app:${RESET}" >&2
+
+    local -a files
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && files+=("$line")
+    done < <(list_${store_type} "$datastore" "$app")
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo -e "${RED}✗ No backups found for $app${RESET}" >&2
+        echo ""
+        return
+    fi
+
+    # display with index
+    echo -e "\n${YELLOW}Available backups for $app:${RESET}" >&2
+    for i in "${!files[@]}"; do
+        echo -e "  $((i+1))) ${files[$i]}" >&2
+    done
+    echo -e "  0) Cancel\n" >&2
+
+    # prompt
+    local selection
+    read -p "Select backup to restore [0-${#files[@]}]: " selection >&2
+
+    # validate
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [[ "$selection" -eq 0 ]]; then
+        echo -e "${YELLOW}⚠ Restore cancelled${RESET}" >&2
+        echo ""
+        return
+    fi
+
+    if [[ "$selection" -gt ${#files[@]} ]]; then
+        echo -e "${RED}✗ Invalid selection${RESET}" >&2
+        echo ""
+        return
+    fi
+
+    # return filename
+    echo "${files[$((selection-1))]}"
+}
+
+download_from_s3() {
+    local store=$1
+    local file_path=$2
+
+    local bucket=$(store_field "$store" bucket)
+    local endpoint=$(store_field "$store" endpoint)
+    local key_id=$(store_field "$store" key_id)
+    local key_secret=$(store_field "$store" key_secret)
+
+    echo "  Downloading from $store..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" "rclone copyto ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${file_path}' '/tmp/$file_path' --s3-endpoint='${endpoint}' --s3-region=auto --s3-no-check-bucket --quiet"
+}
+
+restore_app() {
+    local app=$1
+    echo -e "\n${YELLOW}▶ Restoring $app...${RESET}"
+
+    local server=$(app_field "$app" server)
+    [[ -z "$server" ]] && { echo -e "${RED}✗ Project '$app' not found${RESET}"; return 1; }
+
+    local deploy_dir="/var/www/$app"
+    build_ssh_opts "$server"
+
+    # read files to backup from projects-data.yaml
+    local files=$(data_field "$app" "files[]")
+    [[ -z "$files" ]] && { echo -e "${RED}✗ No data files config for the project $app${RESET}"; return 1; }
+
+    local datastore=$(data_field "$app" datastore)
+    local store_type=$(store_field "$datastore" "type")
+
+    local selected_file
+    selected_file=$(list_backups "$app" "$datastore")
+
+    [[ -z "$selected_file" ]] && return 0
+
+    local backup_path="$app/$selected_file"
+    download_from_${store_type} "$datastore" "$backup_path"
+
+    # stop container
+    echo "  Stopping app..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" \
+        "cd $deploy_dir && docker compose down" 2>/dev/null || true
+
+    # extract
+    echo "  Restoring files..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
+cd $deploy_dir
+tar xzf /tmp/$backup_path
+chown -R deploy:deploy $deploy_dir
+rm -f /tmp/$backup_path
+EOF
+
+    echo "  Starting app..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" \
+        "sudo -u deploy bash -c 'cd $deploy_dir && docker compose up -d'"
+
+    echo -e "${GREEN}✓ Restore completed${RESET}"
+}
+
 
 deploy_app() {
     local app=$1
@@ -187,13 +303,15 @@ deploy_app() {
     ssh "${SSH_OPTS[@]}" $TARGET "sudo chown -R deploy:deploy $deploy_dir"
 
     ssh "${SSH_OPTS[@]}" $TARGET << ENDSSH
-sudo -u deploy bash << 'INNEREOF'
 cd $deploy_dir
-docker compose pull -q
 # if .env is a directory (docker created it), remove it
 [ -d .env ] && rm -rf .env && echo "  Removed .env directory"
 # create .env from .env.example if missing
 [ ! -f .env ] && cp .env.example .env 2>/dev/null && echo "  Created .env from .env.example" || true
+sudo chown -R deploy:deploy $deploy_dir
+sudo -u deploy bash << INNEREOF
+cd $deploy_dir
+docker compose pull -q
 docker compose up -d --remove-orphans
 docker image prune -f
 INNEREOF
@@ -219,6 +337,11 @@ case "${1:-}" in
         [[ -z "$app" ]] && { echo "usage: $0 backup <project name>"; exit 1; }
         backup_app "$app"
         ;;
+    restore)
+        app=${2}
+        [[ -z "$app" ]] && { echo "usage: $0 restore <project name>"; exit 1; }
+        restore_app "$app"
+        ;;
     deploy)
         target=${2}
         if [[ "$target" == "all" ]]; then
@@ -234,5 +357,7 @@ case "${1:-}" in
     *)
         echo "usage: $0 list"
         echo "       $0 deploy all | $0 deploy project1 project2 ... "
+        echo "       $0 backup all | $0 backup project1 project2 ... "
+        echo "       $0 restore all | $0 restore project1 project2 ... "
         ;;
 esac
