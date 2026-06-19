@@ -386,7 +386,12 @@ deploy_app() {
     # sync docker-compose.yml and .env.example from repo
     scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.yml" "$TARGET:$deploy_dir/docker-compose.yml"
     [ -f $tmp/$app/docker-compose.override.yml ] &&  scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.override.yml" "$TARGET:$deploy_dir/docker-compose.override.yml"
-    scp "${SSH_OPTS[@]}" "$tmp/$app/.env.example" "$TARGET:$deploy_dir/.env.example"
+    # use envs/.env.$app if exists, else .env.example from project repo
+    if [ -f "$SCRIPT_DIR/envs/.env.$app" ]; then
+         scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/envs/.env.$app" "$TARGET:$deploy_dir/.env.example"
+    else
+        [ -f $tmp/$app/.env.example ] && scp "${SSH_OPTS[@]}" "$tmp/$app/.env.example" "$TARGET:$deploy_dir/.env.example"
+    fi
     ssh "${SSH_OPTS[@]}" $TARGET "sudo chown -R deploy:deploy $deploy_dir"
 
     ssh "${SSH_OPTS[@]}" $TARGET << ENDSSH
