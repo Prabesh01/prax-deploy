@@ -359,8 +359,12 @@ deploy_app() {
     }
 
     ghcr_url="ghcr.io/$gh_username/$app:latest"
-
     docker tag $app $ghcr_url
+
+    echo "DEBUG: gh_username=$gh_username"
+    echo "DEBUG: gh_token length=${#gh_token}"
+
+     echo "$gh_token" | docker login ghcr.io -u "$gh_username" --password-stdin
 
     echo "  Pushing $app..."
     #docker push $ghcr_url -q
