@@ -92,8 +92,9 @@ fi
 if ! id deploy &>/dev/null; then
     echo "  Creating deploy user..."
     useradd -m -s /bin/bash deploy
-    usermod -aG docker deploy
 fi
+usermod -s /bin/bash deploy
+usermod -aG docker deploy
 
 # App dirs
 mkdir -p "$deploy_dir"
