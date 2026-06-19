@@ -106,6 +106,9 @@ usermod -aG docker deploy
 mkdir -p "$deploy_dir"
 chown deploy:deploy "$deploy_dir"
 
+# Shared directory for cross-project files
+mkdir -p /var/www/shared
+chown deploy:deploy /var/www/shared
 EOF
 
 ssh "${SSH_OPTS[@]}" "$TARGET" << 'EOF'
