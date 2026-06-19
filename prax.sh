@@ -10,6 +10,12 @@ KEYS="$SCRIPT_DIR/keys"
 [[ -f "$SCRIPT_DIR/.env" ]] && source "$SCRIPT_DIR/.env"
 gh_token="${GITHUB_TOKEN}"
 [[ -z "$gh_token" ]] && { echo -e "${RED}✗ GITHUB_TOKEN not set${RESET}"; exit 1; }
+gh_username="$GITHUB_USERNAME"
+if [ -z "$gh_username" ]; then
+    gh_username=$(getent passwd "$USER" | cut -d: -f5 | cut -d, -f2)
+    gh_username=$(echo "$gh_username" | tr '[:upper:]' '[:lower:]')
+fi
+[[ -z "$gh_username" ]] && { echo -e "${RED}✗ GITHUB_USERNAME not set${RESET}"; exit 1; }
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; RESET='\033[0m'
 
@@ -352,8 +358,6 @@ deploy_app() {
         echo -e "${RED}✗ Build failed${RESET}"; return 1
     }
 
-    gh_username=$(getent passwd "$USER" | cut -d: -f5 | cut -d, -f2)
-    gh_username=$(echo "$gh_username" | tr '[:upper:]' '[:lower:]')
     ghcr_url="ghcr.io/$gh_username/$app:latest"
 
     docker tag $app $ghcr_url
