@@ -129,6 +129,69 @@ ssh "${SSH_OPTS[@]}" "$TARGET" \
     echo -e "${GREEN}✓ $server setup complete${RESET}"
 }
 
+backup_databases() {
+    local app=$1
+    local deploy_dir="/var/www/$app"
+
+    local db_backups=""
+
+    local db_configs=$(data_field "$app" "databases[]")
+    [[ -z "$db_configs" ]] && return 0
+
+    while read -r entry; do
+        [[ -z "$entry" ]] && continue
+
+        local service="${entry%%-*}"
+        local connection_string="${entry#*-}"
+        local db_type="${connection_string%%://*}"
+
+        case $db_type in
+            mongodb)
+                ssh "${SSH_OPTS[@]}" "$TARGET" sudo -u deploy bash << INNEREOF
+cd $deploy_dir
+mkdir -p backup/$db_type
+docker compose exec -T $service mongodump --uri="$connection_string" --out=/tmp/backup
+docker compose cp $service:/tmp/backup/. backup/$db_type/
+docker compose exec -T $service rm -rf /tmp/backup
+INNEREOF
+                db_backups="$db_backups backup/$db_type"
+                ;;
+        esac
+    done < <(echo "$db_configs")
+
+    echo "$db_backups"
+}
+
+restore_databases() {
+    local app=$1
+    local deploy_dir="/var/www/$app"
+
+    local db_configs=$(data_field "$app" "databases[]")
+    [[ -z "$db_configs" ]] && return 0
+
+    echo "  Restoring databases..."
+
+    while read -r entry; do
+        [[ -z "$entry" ]] && continue
+
+        local service="${entry%%-*}"
+        local connection_string="${entry#*-}"
+        local db_type="${connection_string%%://*}"
+
+        case $db_type in
+            mongodb)
+                ssh "${SSH_OPTS[@]}" "$TARGET" sudo -u deploy bash << INNEREOF
+cd $deploy_dir
+docker compose cp backup/$db_type/. $service:/tmp/restore/
+docker compose exec -T $service mongorestore --uri="$connection_string" /tmp/restore
+docker compose exec -T $service rm -rf /tmp/restore
+rm -rf backup/$db_type
+INNEREOF
+                ;;
+        esac
+    done < <(echo "$db_configs")
+}
+
 backup_app() {
     local app=$1
     echo -e "\n${YELLOW}▶ Backing up $app...${RESET}"
@@ -139,9 +202,11 @@ backup_app() {
     local deploy_dir="/var/www/$app"
     build_ssh_opts "$server"
 
+    local db_backups=$(backup_databases "$app")
+
     # read files to backup from projects-data.yaml
     local files=$(data_field "$app" "files[]")
-    [[ -z "$files" ]] && { echo -e "${RED}✗ No data files config for the project $app${RESET}"; return 1; }
+    [[ -z "$files" && -z "$db_backups" ]] && { echo -e "${RED}✗ Nothing to backup for the project $app${RESET}"; return 1; }
 
     local datastore=$(data_field "$app" datastore)
     local timestamp=$(date +%Y%m%d_%H%M%S)
@@ -150,7 +215,7 @@ backup_app() {
     local backup_path="${app}/${timestamp}.tar.gz"
 
     # build tar arguments
-    local tar_args=""
+    local tar_args="$db_backups"
     while IFS= read -r file; do
         tar_args="$tar_args $file"
     done <<< "$files"
@@ -283,6 +348,8 @@ EOF
     echo "  Starting app..."
     ssh "${SSH_OPTS[@]}" "$TARGET" \
         "sudo -u deploy bash -c 'cd $deploy_dir && docker compose up -d'"
+
+    restore_databases "$app"
 
     echo -e "${GREEN}✓ Restore completed${RESET}"
 }
