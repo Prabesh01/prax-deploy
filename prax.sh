@@ -334,6 +334,21 @@ systemctl reload caddy
 EOF
 }
 
+add_caddyfile() {
+    local app=$1
+
+    ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
+grep -qxF 'import /etc/caddy/sites/*.caddy' /etc/caddy/Caddyfile 2>/dev/null || \
+    echo 'import /etc/caddy/sites/*.caddy' >> /etc/caddy/Caddyfile
+mkdir -p /etc/caddy/sites
+EOF
+
+scp "${SSH_OPTS[@]}" "$tmp/$app/Caddyfile" "$TARGET:/etc/caddy/sites/$app.caddy"
+
+ssh "${SSH_OPTS[@]}" "$TARGET" "caddy fmt --overwrite /etc/caddy/Caddyfile && systemctl reload caddy"
+}
+
+
 deploy_app() {
     local app=$1
     echo -e "\n${YELLOW}▶ Deploying $app...${RESET}"
@@ -382,8 +397,10 @@ deploy_app() {
     # --- deploy on VPS ---
     echo "  Deploying on $server..."
 
-    echo "  Overriding service ports..."
-    generate_port_override "$app" "$tmp/$app/"
+    if [ ! -f "$tmp/$app/Caddyfile" ]; then
+        echo "  Overriding service ports..."
+        generate_port_override "$app" "$tmp/$app/"
+    fi
 
     # copy compose file and env if not already there
     # sync docker-compose.yml and .env.example from repo
@@ -412,16 +429,19 @@ docker image prune -f
 INNEREOF
 ENDSSH
 
+    if [ ! -f "$tmp/$app/Caddyfile" ]; then
 echo "  Configuring domains..."
 while IFS= read -r entry; do
         parse_domain_entry "$entry"
         [[ "$DOMAIN" == "-" ]] && continue
         update_caddy "$DOMAIN" "$HOST_PORT"
 done < <(app_field "$app" "domains[]")
-
+else
+echo "  Adding project's Caddyfile..."
+add_caddyfile "$app"
+fi
 
 echo -e "${GREEN}✓ $app deployed${RESET}"
-
 }
 
 case "${1:-}" in
