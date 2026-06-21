@@ -198,7 +198,7 @@ restore_databases() {
                 ssh "${SSH_OPTS[@]}" "$TARGET" sudo -u deploy bash << INNEREOF
 cd $deploy_dir
 docker compose cp backup/$db_type/. $service:/tmp/restore/
-docker compose exec -T $service mongorestore --uri="$connection_string" /tmp/restore < /dev/null
+docker compose exec -T $service mongorestore --drop --uri="$connection_string" /tmp/restore < /dev/null
 docker compose exec -T $service rm -rf /tmp/restore < /dev/null
 rm -rf backup/$db_type
 INNEREOF
