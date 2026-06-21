@@ -53,6 +53,15 @@ upload_to_s3() {
     ssh "${SSH_OPTS[@]}" "$TARGET" "rclone copyto /tmp/$file ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${file}' --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket --quiet"
 }
 
+upload_to_local() {
+    local store=$1
+    local file=$2
+    echo "  Uploading to local backups..."
+
+    mkdir -p "$SCRIPT_DIR/backups/$(dirname "$file")"
+    scp "${SSH_OPTS[@]}" "$TARGET:/tmp/$file" "$SCRIPT_DIR/backups/$file"
+}
+
 setup_server() {
     #local ssh_opts="$1"
     local deploy_dir="$1"
@@ -248,6 +257,14 @@ list_s3() {
     ssh "${SSH_OPTS[@]}" "$TARGET" "rclone lsf ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${app}' --s3-endpoint='${endpoint}' --s3-region=auto --s3-no-check-bucket 2>/dev/null"
 }
 
+list_local() {
+    local store=$1
+    local app=$2
+
+    [[ ! -d "$SCRIPT_DIR/backups/$app" ]] && return 0
+    ls -1 "$SCRIPT_DIR/backups/$app/" 2>/dev/null || true
+}
+
 list_backups() {
     local app=$1
     local datastore=$2
@@ -304,6 +321,14 @@ download_from_s3() {
 
     echo "  Downloading from $store..."
     ssh "${SSH_OPTS[@]}" "$TARGET" "rclone copyto ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${file_path}' '/tmp/$file_path' --s3-endpoint='${endpoint}' --s3-region=auto --s3-no-check-bucket --quiet"
+}
+
+download_from_local() {
+    local store=$1
+    local file_path=$2
+    echo "  Downloading from local backups..."
+
+    scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/backups/$file_path" "$TARGET:/tmp/$file_path"
 }
 
 restore_app() {
