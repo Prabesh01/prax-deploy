@@ -75,7 +75,13 @@ set -e
 # Docker
 if ! command -v docker &>/dev/null; then
     echo "  Installing Docker..."
-    curl -fsSL https://get.docker.com | sh
+    curl -fsSL https://get.docker.com | sh || true
+    systemctl enable --now docker || true
+fi
+
+if ! command -v docker &>/dev/null; then
+    echo "  Installing Docker (Alternative minimal Atempt)..."
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras docker-buildx-plugin
     systemctl enable --now docker
 fi
 
