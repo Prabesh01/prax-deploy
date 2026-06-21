@@ -165,9 +165,9 @@ backup_databases() {
                 ssh "${SSH_OPTS[@]}" "$TARGET" sudo -u deploy bash << INNEREOF
 cd $deploy_dir
 mkdir -p backup/$db_type
-docker compose exec -T $service mongodump --uri="$connection_string" --out=/tmp/backup
+docker compose exec -T $service mongodump --uri="$connection_string" --out=/tmp/backup < /dev/null
 docker compose cp $service:/tmp/backup/. backup/$db_type/
-docker compose exec -T $service rm -rf /tmp/backup
+docker compose exec -T $service rm -rf /tmp/backup < /dev/null
 INNEREOF
                 db_backups="$db_backups backup/$db_type"
                 ;;
@@ -198,8 +198,8 @@ restore_databases() {
                 ssh "${SSH_OPTS[@]}" "$TARGET" sudo -u deploy bash << INNEREOF
 cd $deploy_dir
 docker compose cp backup/$db_type/. $service:/tmp/restore/
-docker compose exec -T $service mongorestore --uri="$connection_string" /tmp/restore
-docker compose exec -T $service rm -rf /tmp/restore
+docker compose exec -T $service mongorestore --uri="$connection_string" /tmp/restore < /dev/null
+docker compose exec -T $service rm -rf /tmp/restore < /dev/null
 rm -rf backup/$db_type
 INNEREOF
                 ;;
@@ -227,6 +227,7 @@ backup_app() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
 
     local store_type=$(store_field "$datastore" "type")
+    store_type="${store_type:-local}"
     local backup_path="${app}/${timestamp}.tar.gz"
 
     # build tar arguments
@@ -246,7 +247,7 @@ EOF
     upload_to_${store_type} "$datastore" "$backup_path" 
 
     # cleanup
-    ssh "${SSH_OPTS[@]}" "$TARGET" "rm -f /tmp/$backup_path"
+    ssh "${SSH_OPTS[@]}" "$TARGET" "rm -f /tmp/$backup_path && rm -rf $deploy_dir/backup/"
 
     echo -e "${GREEN}✓ Backup completed${RESET}"
 }
@@ -275,6 +276,7 @@ list_backups() {
     local app=$1
     local datastore=$2
     local store_type=$(store_field "$datastore" type)
+    store_type="${store_type:-local}"
     echo -e "\n${YELLOW}Backups for $app:${RESET}" >&2
 
     local -a files
@@ -353,6 +355,7 @@ restore_app() {
 
     local datastore=$(data_field "$app" datastore)
     local store_type=$(store_field "$datastore" "type")
+    store_type="${store_type:-local}"
 
     local selected_file
     selected_file=$(list_backups "$app" "$datastore")
