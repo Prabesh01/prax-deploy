@@ -87,6 +87,20 @@ fi
 
 docker --version || { echo "Docker install failed"; exit 1; }
 
+# Configure Docker logging limits to save disk space
+echo "  Configuring Docker daemon..."
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'DAEMONEOF'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+DAEMONEOF
+systemctl restart docker
+
 # rclone
 if ! command -v rclone &>/dev/null; then
     curl https://rclone.org/install.sh | sudo bash
