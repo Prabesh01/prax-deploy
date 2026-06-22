@@ -377,6 +377,8 @@ restore_app() {
     [[ -z "$selected_file" ]] && return 0
 
     local backup_path="$app/$selected_file"
+    ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p /tmp/$app"
+
     download_from_${store_type} "$datastore" "$backup_path"
 
     # stop container
@@ -442,7 +444,7 @@ update_caddy() {
 
     ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
 # remove old block
-sed -i '/$domain {/,/# prax:$domain:end/d' /etc/caddy/Caddyfile 2>/dev/null || true
+sed -i '/^$domain {/,/# prax:$domain:end/d' /etc/caddy/Caddyfile 2>/dev/null || true
 printf "$caddy_block\n" >> /etc/caddy/Caddyfile
 caddy fmt --overwrite /etc/caddy/Caddyfile
 systemctl reload caddy
@@ -451,6 +453,7 @@ EOF
 
 add_caddyfile() {
     local app=$1
+    local tmp=$2
 
     ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
 grep -qxF 'import /etc/caddy/sites/*.caddy' /etc/caddy/Caddyfile 2>/dev/null || \
@@ -492,7 +495,7 @@ deploy_app() {
     }
 
     ghcr_url="ghcr.io/$gh_username/$app:latest"
-    docker tag $app $ghcr_url
+    docker tag "$app" "$ghcr_url"
 
     echo "DEBUG: gh_username=$gh_username"
     echo "DEBUG: gh_token length=${#gh_token}"
@@ -520,12 +523,12 @@ deploy_app() {
     # copy compose file and env if not already there
     # sync docker-compose.yml and .env.example from repo
     scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.yml" "$TARGET:$deploy_dir/docker-compose.yml"
-    [ -f $tmp/$app/docker-compose.override.yml ] &&  scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.override.yml" "$TARGET:$deploy_dir/docker-compose.override.yml"
+    [ -f "$tmp/$app/docker-compose.override.yml" ] &&  scp "${SSH_OPTS[@]}" "$tmp/$app/docker-compose.override.yml" "$TARGET:$deploy_dir/docker-compose.override.yml"
     # use envs/.env.$app if exists, else .env.example from project repo
     if [ -f "$SCRIPT_DIR/envs/.env.$app" ]; then
          scp "${SSH_OPTS[@]}" "$SCRIPT_DIR/envs/.env.$app" "$TARGET:$deploy_dir/.env"
     else
-        [ -f $tmp/$app/.env.example ] && scp "${SSH_OPTS[@]}" "$tmp/$app/.env.example" "$TARGET:$deploy_dir/.env.example"
+        [ -f "$tmp/$app/.env.example" ] && scp "${SSH_OPTS[@]}" "$tmp/$app/.env.example" "$TARGET:$deploy_dir/.env.example"
     fi
     ssh "${SSH_OPTS[@]}" $TARGET "sudo chown -R deploy:deploy $deploy_dir"
 
@@ -553,7 +556,7 @@ while IFS= read -r entry; do
 done < <(app_field "$app" "domains[]")
 else
 echo "  Adding project's Caddyfile..."
-add_caddyfile "$app"
+add_caddyfile "$app" "$tmp"
 fi
 
 echo -e "${GREEN}✓ $app deployed${RESET}"
