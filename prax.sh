@@ -101,6 +101,18 @@ cat > /etc/docker/daemon.json << 'DAEMONEOF'
 DAEMONEOF
 systemctl restart docker
 
+# Configure journald logging limits to save disk space
+echo "  Configuring journal daemon..."
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf "SystemMaxUse=500M\nSystemMaxFileSize=100M\n" | sudo tee /etc/systemd/journald.conf.d/99-size-limit.conf > /dev/null
+sudo systemctl restart systemd-journald
+
+# Vacuum existing logs immediately
+sudo journalctl --vacuum-size=500M
+# sudo journalctl --vacuum-time=7d
+
+sudo apt-get clean
+
 # rclone
 if ! command -v rclone &>/dev/null; then
     curl https://rclone.org/install.sh | sudo bash
