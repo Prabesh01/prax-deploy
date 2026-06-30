@@ -49,8 +49,21 @@ upload_to_s3() {
     local endpoint=$(store_field "$store" endpoint)
     local key_id=$(store_field "$store" key_id)
     local key_secret=$(store_field "$store" key_secret)
+
+    local app_dir=$(dirname "$file")
  
-    ssh "${SSH_OPTS[@]}" "$TARGET" "rclone copyto /tmp/$file ':s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${file}' --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket --quiet"
+    local base_remote=":s3,provider=Cloudflare,access_key_id=${key_id},secret_access_key=${key_secret}:${bucket}/${app_dir}"
+
+ssh "${SSH_OPTS[@]}" "$TARGET" << EOF
+rclone copyto /tmp/$file '${base_remote}/$(basename "$file")' --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket --quiet
+
+rclone lsf '${base_remote}' --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket | sort -r | tail -n +6 | while read -r old_file; do
+    if [ -n "\$old_file" ]; then
+        echo "  Deleting old S3 backup: \$old_file"
+        rclone deletefile "${base_remote}/\$old_file" --s3-endpoint=${endpoint} --s3-region=auto --s3-no-check-bucket --quiet
+    fi
+done
+EOF
 }
 
 upload_to_local() {
@@ -58,8 +71,18 @@ upload_to_local() {
     local file=$2
     echo "  Uploading to local backups..."
 
-    mkdir -p "$SCRIPT_DIR/backups/$(dirname "$file")"
+    local app_dir=$(dirname "$file")
+    local backup_dir="$SCRIPT_DIR/backups/$app_dir"
+
+    mkdir -p "$backup_dir"
     scp "${SSH_OPTS[@]}" "$TARGET:/tmp/$file" "$SCRIPT_DIR/backups/$file"
+
+    ls -1 "$backup_dir" | sort -r | tail -n +6 | while read -r old_file; do
+        if [ -n "$old_file" ]; then
+            echo "  Deleting old local backup: $old_file"
+            rm -f "$backup_dir/$old_file"
+        fi
+    done
 }
 
 setup_server() {
